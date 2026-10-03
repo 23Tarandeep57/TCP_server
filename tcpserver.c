@@ -1,23 +1,43 @@
 #include "tcpserver.h"
 
-
 public server *globalsrv;
-public connection  *globalconn;
+// Each epoll event carries its own connection pointer.
 #define handler() &handler_
 #define PORT 8181
-
+#define LISTENER_PTR ((void *)1)
+ 
+//handler_ only deals with a particular connection
 private void handler_(connection *conn) {
 	char buff[128];
-	memset(buff, 0, 128);
-	conn->send("welcome to server\n", 19);
-	conn->recv(buff, 127);
-	printf("Recieved '%s'\n", buff);
-	return;
+	memset(buff, 0, sizeof(buff));
+	//conn->send(conn, "welcome to server\n", 19);
+
+    /* Because the socket is non-blocking and we are using
+     * edge-triggered epoll, keep reading until EAGAIN*/
+	while (1) {
+		int ret = conn->recv(conn, buff, sizeof(buff) - 1);
+		if (ret > 0) {
+			buff[ret] = '\0';
+			printf("Received '%s'\n", buff);
+			memset(buff, 0, sizeof(buff));
+		} else if (ret == 0) {
+			close(conn->fd);
+			free(conn);
+			return;
+		} else {
+			if (errno == EAGAIN || errno == EWOULDBLOCK) 
+				break;
+
+			perror("recv");
+			close(conn->fd);
+			free(conn);
+			return;
+		}
+	}
 }
 
 private init void start() {
 	globalsrv = (server*) 0;
-	globalconn = (connection*) 0;
 	return;
 }
 
@@ -28,19 +48,35 @@ public server* tcpserver(int16 port, callback cb) {
 	struct sockaddr_in sock;
 	server* srv;
 
-	if (globalsrv)
+	if (globalsrv){
 		reterr((char*) "TCP server already initialised");
+	}
 	
 	ret = socket(AF_INET, SOCK_STREAM, 0);
 	if (ret < 0) {
 		reterr((char*)"Failed to initialise socket");
-	} else { 
+	}
+	else {
 		s = (int32) ret;
 	}
+	
+	int opt = 1;
+	setsockopt(
+		s,
+		SOL_SOCKET,
+		SO_REUSEADDR,
+		&opt,
+		sizeof(opt)
+	);
+
+	//Make server socket non-blocking
+	fcntl(s, F_SETFL, O_NONBLOCK);
+
+	memset(&sock, 0, sizeof(sock));
 
 	sock.sin_family = AF_INET;
 	sock.sin_port = htons(port);
-	sock.sin_addr.s_addr = INADDR_ANY;
+	sock.sin_addr.s_addr = htonl(INADDR_ANY);
 
 	ret = bind((int)s, (struct sockaddr*)& sock, sizeof(struct sockaddr));
 	if (ret) {
@@ -48,8 +84,7 @@ public server* tcpserver(int16 port, callback cb) {
 		reterr((char*) "Unable to bind to port");
 	}
 
-
-	ret = listen(s, 10);
+	ret = listen(s, 128);
 
 	if (ret) {
 		close(s);
@@ -96,80 +131,166 @@ private int listenfunc() {
 	if (!globalsrv || globalsrv->status == Errstatus) 
 		return -1;
 	
-	int32 s;
-	signed int ret;
 	struct sockaddr_in sock;
-	socklen_t len;
-	int16 size;
+	socklen_t len = sizeof(sock);
+	int client_fd;
 	connection *conn;
+	
+	int efd;
+	struct epoll_event ev;
+	struct epoll_event events[MAX_EVENTS];
 
-	if (fork()) 
-		exit(0);
+	// create 1 epoll instance for the entire server
+	efd = epoll_create1(0);
 
-	len = sizeof (struct sockaddr_in);
-	size = sizeof(connection);
+	if (efd == -1) {
+		perror("epoll_create1");
+		return -1;
+}
 
-	while(true) {
-		ret = accept((int)globalsrv->fd, (struct sockaddr*)&sock, &len);
-		if (ret < 0) {
-			sleep(2);
-			continue;
-		}
-		else
-			s = (int32)ret;
+    memset(&ev, 0, sizeof(ev));
+    ev.events = EPOLLIN | EPOLLET;
 
-		conn = (connection*) malloc((int)size);
-
-		if (!conn) {
-			close(s);
-			sleep(2);
-			continue;
-		}
-		memset((char*)conn, 0, size);
-		
-		conn->fd = s;
-		strncpy((char*)conn->host,inet_ntoa(sock.sin_addr), 15);
-		conn->port = htons(sock.sin_port);
-		conn->send = &sendfunc;
-		conn->recv = &recvfunc;
-		if (fork()) {
-			close(s);
-			if (conn) 
-				free(conn);
-			continue;
-		}
-		globalconn = conn;
-		globalsrv->cb(conn);
-		close(s);
-		exit(0);
+    // For the listening socket we store the fd
+    // Client sockets will store connection* instead
+	//
+	ev.data.ptr = LISTENER_PTR;
+    
+	if (epoll_ctl(efd, EPOLL_CTL_ADD, globalsrv->fd, &ev) == -1) {
+		perror("epoll_ctl: server");
+		close(efd);
+		return -1;
 	}
-	exit(0);
-	return 0;
+
+    printf("epoll server started\n");
+
+	while (true) {
+		int nfds;
+		nfds = epoll_wait(efd, events, MAX_EVENTS, -1);
+
+		if (nfds == -1) {
+			if (errno == EINTR)
+			    continue;
+			perror("epoll_wait");
+			break;
+		}
+
+		for (int i = 0; i < nfds; i++) {
+			if (events[i].data.ptr == LISTENER_PTR) {
+				//Because we use EPOLLET, we MUST accept
+				//until accept() returns EAGAIN.
+				while (true) {
+					client_fd = accept(globalsrv->fd, (struct sockaddr*)&sock,&len);
+					if (client_fd == -1) {
+						if (errno == EAGAIN || errno == EWOULDBLOCK) {
+							//No more pending connections.
+							break;
+                        }
+						perror("accept");
+						break;
+					}
+
+					fcntl(client_fd, F_SETFL, O_NONBLOCK);
+					// Allocate connection obj
+					conn = (connection*) malloc(sizeof(connection));
+					
+					if (!conn) {
+						perror("malloc");
+						close(client_fd);
+						continue;
+					}
+
+					memset(conn, 0, sizeof(connection));
+					conn->fd = client_fd;
+					strncpy(
+						(char*)conn->host,
+						inet_ntoa(sock.sin_addr),
+						15
+					);
+					conn->host[15] = '\0';
+					conn->port = ntohs(sock.sin_port);
+					conn->send = &sendfunc;
+					conn->recv = &recvfunc;
+
+					//Store connection* inside epoll.
+					memset(&ev, 0, sizeof(ev));
+					ev.events = EPOLLIN | EPOLLET;
+					ev.data.ptr = conn;
+					
+					if (epoll_ctl(efd, EPOLL_CTL_ADD, client_fd, &ev) == -1) {
+						perror("epoll_ctl: client");
+						close(client_fd);
+						free(conn);
+						continue;
+					}
+
+                    printf("Client connected: %s:%d fd=%d\n", 
+						   conn->host, conn->port, conn->fd);
+				}
+			}
+
+			//EXISTING CLIENT
+			else {
+				connection *conn;
+				// Recover the connection obj in epoll_event.data.ptr.
+				conn = (connection*) events[i].data.ptr;
+
+				// err or hangup
+				if (events[i].events & EPOLLERR || events[i].events & EPOLLHUP) {
+					epoll_ctl(efd, EPOLL_CTL_DEL, conn->fd, NULL);
+					
+					printf("Client disconnected: %s:%d\n",
+						conn->host,conn->port);
+					
+					close(conn->fd);
+					free(conn);
+					continue;
+				}
+
+				// readble client socket
+				if (events[i].events & EPOLLIN)
+					globalsrv->cb(conn);
+			}
+		}
+	}
+    close(efd);
+    return 0;
 }
 
-private int recvfunc(char* buff, int size) {
-	if (!globalconn || !buff || !size) 
+private int recvfunc(connection *conn, char* buff, int size) {
+	if (!conn || !buff || !size)
 		return -1;
 
-	return read(globalconn->fd, buff, size);
+    return read(conn->fd, buff, size);
 }
 
-private int sendfunc(char* buff, int size) {
-	if (!globalconn || !buff || !size) 
+private int sendfunc(connection *conn, char* buff, int size) {
+	if (!conn || !buff || !size)
 		return -1;
 
-	return write(globalconn->fd, buff, size);
+	return write(conn->fd, buff, size);
 }
 
 int main() {
 	server *serv;
 
 	serv = tcpserver(PORT, handler());
-	if (serv && !serv->ok()) {
-		printf("Error %s\n", serv->err());
+	if (!serv) {
+		printf("Failed to create server\n");
 		return -1;
 	}
 
+	if (serv->status == Errstatus) {
+		printf("Error: %s\n", serv->errmsg);
+		free(serv);
+		return -1;
+	}
+
+	if (!serv->ok()) {
+		printf("Error %s\n", serv->err());
+		free(serv);
+		return -1;
+	}
 	printf("Listening to port %d\n", PORT);
 
 	return serv->listen();
