@@ -4,7 +4,21 @@ public server *globalsrv;
 // Each epoll event carries its own connection pointer.
 #define handler() &handler_
 #define PORT 8181
- 
+
+char* all_clients[]= {"max", "taran", "kola"};
+int num_clients = 3;
+
+
+
+static bool authenticate(const char* name) {// TODO: Passworrd
+	for (int i = 0; i < num_clients; i++) {
+		if (strcmp(name, all_clients[i]) == 0)
+			return true;
+	}
+	
+	return false;
+}
+
 //handler_ only deals with a particular connection
 private void handler_(connection *conn) {
 	char buff[128];
@@ -15,15 +29,14 @@ private void handler_(connection *conn) {
      * edge-triggered epoll, keep reading until EAGAIN*/
 	while (1) {
 		int ret = conn->recv(conn, buff, sizeof(buff) - 1);
-		if (ret > 0) {
-			buff[ret] = '\0';
-			printf("Received '%s'\n", buff);
-			memset(buff, 0, sizeof(buff));
-		} else if (ret == 0) {
+
+		if (ret == 0) {
 			close(conn->fd);
 			free(conn);
 			return;
-		} else {
+		} else if (ret < 0) {
+			if (errno == EINTR)
+				continue;
 			if (errno == EAGAIN || errno == EWOULDBLOCK) 
 				break;
 
@@ -31,6 +44,43 @@ private void handler_(connection *conn) {
 			close(conn->fd);
 			free(conn);
 			return;
+		}
+
+		for (int i = 0; i < ret; i++) {
+			char ch = buff[i];
+
+			if (ch == '\r') continue;
+			if (ch != '\n') {
+				if (conn->input_len >= IBUF_SZ - 1) {
+					close(conn->fd);
+					free(conn);
+					return;
+				}
+
+				conn->input[conn->input_len++] = ch;
+				continue;
+			}
+
+			// A complete line has arrived.
+			conn->input[conn->input_len] = '\0';
+			conn->input_len = 0;
+
+			if (conn->auth == AUTH_PENDING) {
+				if (authenticate(conn->input)) {
+					strncpy(conn->username, conn->input, sizeof(conn->username) - 1);
+					conn->auth = AUTHENTICATED;
+
+					printf("Authenticated: %s\n", conn->username);
+					conn->send(conn, "Login successful!\n", 18);
+				} else {
+					conn->send(conn, "Unknown username.\n", 19);
+					conn->send(conn, "Enter your username: ", 21);
+				}
+			} else {
+				printf("[%s]: %s\n", conn->username, conn->input);
+
+				// TODO: interpret LS, CD, SEND, etc.
+			}
 		}
 	}
 }
@@ -167,7 +217,7 @@ private void accept_clients(int efd) {
 			break;
 		}
 
-			if (fcntl(client_fd, F_SETFL, fcntl(client_fd, F_GETFL, 0) | O_NONBLOCK) == -1) {
+		if (fcntl(client_fd, F_SETFL, fcntl(client_fd, F_GETFL, 0) | O_NONBLOCK) == -1) {
 			perror("fcntl: client");
 			close(client_fd);
 			continue;
@@ -188,6 +238,15 @@ private void accept_clients(int efd) {
 		conn->port = ntohs(sock.sin_port);
 		conn->send = &sendfunc;
 		conn->recv = &recvfunc;
+		conn->auth = AUTH_PENDING;
+		conn->input_len = 0;
+		
+		if (conn->send(conn, "Enter your username: ", 21) < 0) {
+    		close(client_fd);
+    		free(conn);
+			sleep(2);
+    		continue;
+		}
 
 		memset(&ev, 0, sizeof(ev));
 		ev.events = EPOLLIN | EPOLLET;

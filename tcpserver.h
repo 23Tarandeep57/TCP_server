@@ -42,12 +42,22 @@ typedef unsigned long long int int64;
 	return _srv; \
 }while(false);
 
+typedef enum {
+	AUTH_PENDING,
+	AUTHENTICATED
+} auth_state;
+
 struct s_connection {
 	int32 fd;
 	int8 host[16];
 	int16 port;
 	int (*recv)(struct s_connection *, char *, int);
     int (*send)(struct s_connection *, char *, int);
+
+	auth_state auth;
+	char username[UNAME_LEN];
+	char input[IBUF_SZ];
+	size_t input_len;
 };
 typedef struct s_connection connection;
 
