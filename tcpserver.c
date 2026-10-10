@@ -4,7 +4,6 @@ public server *globalsrv;
 // Each epoll event carries its own connection pointer.
 #define handler() &handler_
 #define PORT 8181
-#define LISTENER_PTR ((void *)1)
  
 //handler_ only deals with a particular connection
 private void handler_(connection *conn) {
@@ -127,141 +126,139 @@ private char *errfunc() {
 		return (char*) globalsrv->errmsg;
 }
 
-private int listenfunc() {
-	if (!globalsrv || globalsrv->status == Errstatus) 
-		return -1;
-	
-	struct sockaddr_in sock;
-	socklen_t len = sizeof(sock);
-	int client_fd;
-	connection *conn;
-	
-	int efd;
-	struct epoll_event ev;
-	struct epoll_event events[MAX_EVENTS];
-
-	// create 1 epoll instance for the entire server
-	efd = epoll_create1(0);
-
+private int create_epoll(void) {
+	int efd = epoll_create1(0);
 	if (efd == -1) {
 		perror("epoll_create1");
 		return -1;
-}
+	}
 
-    memset(&ev, 0, sizeof(ev));
-    ev.events = EPOLLIN | EPOLLET;
+	struct epoll_event ev;
+	memset(&ev, 0, sizeof(ev));
+	ev.events = EPOLLIN | EPOLLET;
+	ev.data.fd = globalsrv->fd;
 
-    // For the listening socket we store the fd
-    // Client sockets will store connection* instead
-	//
-	ev.data.ptr = LISTENER_PTR;
-    
 	if (epoll_ctl(efd, EPOLL_CTL_ADD, globalsrv->fd, &ev) == -1) {
 		perror("epoll_ctl: server");
 		close(efd);
 		return -1;
 	}
 
-    printf("epoll server started\n");
+	return efd;
+}
+
+private void accept_clients(int efd) {
+	struct sockaddr_in sock;
+	struct epoll_event ev;
+	int client_fd;
+	socklen_t len = sizeof(sock);
+	
+	while (true) {
+		client_fd = accept( globalsrv->fd, (struct sockaddr *)&sock, &len);
+
+		if (client_fd == -1) {
+			if (errno == EAGAIN || errno == EWOULDBLOCK)
+				break;
+
+			if (errno == EINTR)
+				continue;
+
+			perror("accept");
+			break;
+		}
+
+			if (fcntl(client_fd, F_SETFL, fcntl(client_fd, F_GETFL, 0) | O_NONBLOCK) == -1) {
+			perror("fcntl: client");
+			close(client_fd);
+			continue;
+		}
+
+		connection *conn = malloc(sizeof(connection));
+		if (!conn) {
+			perror("malloc");
+			close(client_fd);
+			continue;
+		}
+
+		memset(conn, 0, sizeof(connection));
+		conn->fd = client_fd;
+
+		strncpy((char *)conn->host, inet_ntoa(sock.sin_addr), 15);
+		conn->host[15] = '\0';
+		conn->port = ntohs(sock.sin_port);
+		conn->send = &sendfunc;
+		conn->recv = &recvfunc;
+
+		memset(&ev, 0, sizeof(ev));
+		ev.events = EPOLLIN | EPOLLET;
+		ev.data.ptr = conn;
+
+		if (epoll_ctl(efd, EPOLL_CTL_ADD, client_fd, &ev) == -1) {
+			perror("epoll_ctl: client");
+			close(client_fd);
+			free(conn);
+			continue;
+		}
+
+		printf("Client connected: %s:%d fd=%d\n", conn->host, conn->port, conn->fd);
+	}
+}
+
+private void handle_client_event(int efd, struct epoll_event *event ) {
+	connection *conn = (connection *)event->data.ptr;
+
+	if (event->events & (EPOLLERR | EPOLLHUP | EPOLLRDHUP)) {
+		epoll_ctl(efd, EPOLL_CTL_DEL, conn->fd, NULL);
+
+		printf("Client disconnected: %s:%d\n", conn->host, conn->port);
+		close(conn->fd);
+		free(conn);
+		return;
+	}
+	
+	if (event->events & EPOLLIN)
+		globalsrv->cb(conn);
+}
+
+private int listenfunc(void) {
+	if (!globalsrv || globalsrv->status == Errstatus)
+		return -1;
+
+	int efd = create_epoll();
+	if (efd == -1)
+		return -1;
+
+	struct epoll_event events[MAX_EVENTS];
+
+	printf("epoll server started\n");
 
 	while (true) {
-		int nfds;
-		nfds = epoll_wait(efd, events, MAX_EVENTS, -1);
+		int nfds = epoll_wait(efd, events, MAX_EVENTS, -1);
 
 		if (nfds == -1) {
 			if (errno == EINTR)
-			    continue;
+				continue;
+
 			perror("epoll_wait");
 			break;
 		}
 
 		for (int i = 0; i < nfds; i++) {
-			if (events[i].data.ptr == LISTENER_PTR) {
-				//Because we use EPOLLET, we MUST accept
-				//until accept() returns EAGAIN.
-				while (true) {
-					client_fd = accept(globalsrv->fd, (struct sockaddr*)&sock,&len);
-					if (client_fd == -1) {
-						if (errno == EAGAIN || errno == EWOULDBLOCK) {
-							//No more pending connections.
-							break;
-                        }
-						perror("accept");
-						break;
-					}
-
-					fcntl(client_fd, F_SETFL, O_NONBLOCK);
-					// Allocate connection obj
-					conn = (connection*) malloc(sizeof(connection));
-					
-					if (!conn) {
-						perror("malloc");
-						close(client_fd);
-						continue;
-					}
-
-					memset(conn, 0, sizeof(connection));
-					conn->fd = client_fd;
-					strncpy(
-						(char*)conn->host,
-						inet_ntoa(sock.sin_addr),
-						15
-					);
-					conn->host[15] = '\0';
-					conn->port = ntohs(sock.sin_port);
-					conn->send = &sendfunc;
-					conn->recv = &recvfunc;
-
-					//Store connection* inside epoll.
-					memset(&ev, 0, sizeof(ev));
-					ev.events = EPOLLIN | EPOLLET;
-					ev.data.ptr = conn;
-					
-					if (epoll_ctl(efd, EPOLL_CTL_ADD, client_fd, &ev) == -1) {
-						perror("epoll_ctl: client");
-						close(client_fd);
-						free(conn);
-						continue;
-					}
-
-                    printf("Client connected: %s:%d fd=%d\n", 
-						   conn->host, conn->port, conn->fd);
-				}
-			}
-
-			//EXISTING CLIENT
-			else {
-				connection *conn;
-				// Recover the connection obj in epoll_event.data.ptr.
-				conn = (connection*) events[i].data.ptr;
-
-				// err or hangup
-				if (events[i].events & EPOLLERR || events[i].events & EPOLLHUP) {
-					epoll_ctl(efd, EPOLL_CTL_DEL, conn->fd, NULL);
-					
-					printf("Client disconnected: %s:%d\n",
-						conn->host,conn->port);
-					
-					close(conn->fd);
-					free(conn);
-					continue;
-				}
-
-				// readble client socket
-				if (events[i].events & EPOLLIN)
-					globalsrv->cb(conn);
-			}
+			if (events[i].data.fd == globalsrv->fd)
+				accept_clients(efd);
+			else
+				handle_client_event(efd, &events[i]);
 		}
 	}
-    close(efd);
-    return 0;
+	close(efd);
+	return 0;
 }
 
 private int recvfunc(connection *conn, char* buff, int size) {
 	if (!conn || !buff || !size)
 		return -1;
 
-    return read(conn->fd, buff, size);
+	return read(conn->fd, buff, size);
 }
 
 private int sendfunc(connection *conn, char* buff, int size) {
