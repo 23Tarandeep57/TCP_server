@@ -26,41 +26,60 @@ char* fd_to_name(int fd) {
 }
 
 static char **parser(char *instr) {
-    static char *parts[100];
-    char *saveptr = NULL;
-    char *token;
-    int n = 0;
+	static char *parts[100];
+	char *saveptr = NULL;
+	char *token;
+	int n = 0;
 
-    memset(parts, 0, sizeof(parts));
+	memset(parts, 0, sizeof(parts));
 
-    token = strtok_r(instr, " \t", &saveptr);
+	token = strtok_r(instr, " \t", &saveptr);
 
-    while (token != NULL && n < 99) {
-        parts[n++] = token;
-        token = strtok_r(NULL, " \t", &saveptr);
-    }
+	while (token != NULL && n < 99) {
+		parts[n++] = token;
+		token = strtok_r(NULL, " \t", &saveptr);
+	}
 
-    parts[n] = NULL;
-    return parts;
+	parts[n] = NULL;
+	return parts;
 } 
 
 void netio(connection* conn) {
+	char message[IBUF_SZ];
 	int i;
 	char* name;
-	char** parts = parser(conn->input);
-	if (conn->target_fd != -1) {
-		conn->send(conn->target_fd, conn->username, sizeof(conn->username));
-		conn->send(conn->target_fd, conn->input, sizeof(conn->input));
+	strncpy(message, conn->input, sizeof(message) - 1);
+	message[sizeof(message) - 1] = '\0';
+	
+	char parsebuf[IBUF_SZ];
+	strcpy(parsebuf, message);
+
+	char **parts = parser(parsebuf);
+	if (parts[0] == NULL)
+		return;
+	
+	if (strcmp(conn->input , "QUIT") == 0) 
+		conn->target_fd = -1;
+
+	else if (conn->target_fd != -1) {
+		char* msg;
+		size_t sz = (sizeof(conn->username) + 4);
+		msg = malloc(sz);
+		strcat(msg, "[");
+		strcat(msg, conn->username);
+		strcat(msg, "] ");
+		conn->send(conn->target_fd, msg, sz);
+		conn->send(conn->target_fd, message, strlen(message));
+		conn->send(conn->target_fd, "\n", 1);
 	}
-	if (strcmp(conn->input, "LS") == 0) {
+	else if (strcmp(conn->input, "LS") == 0) {
     	for (i = 0; i < globalsrv->num_clients; i++) {
-        	name = globalsrv->creds[i].username;
-        	conn->send(conn->fd, name, strlen(name));
-        	conn->send(conn->fd, "  ", 2);
-    	}
-    	conn->send(conn->fd, "\n", 1);
+			name = globalsrv->creds[i].username;
+			conn->send(conn->fd, name, strlen(name));
+			conn->send(conn->fd, "  ", 2);
+		}
+		conn->send(conn->fd, "\n", 1);
 	}else if (strcmp(parts[0], "CD") == 0) {//TODO assert parts.size == 2
-		strcat(conn->loc, parts[1]);
 		int target_fd = name_to_fd(parts[1]);
 		if (target_fd == 0) {
 			printf("NO USER OF THIS NAME");
@@ -68,19 +87,19 @@ void netio(connection* conn) {
 		conn->target_fd = target_fd;
 	}
 	else {
-		printf("[%s]: %s\n", conn->username, conn->input);
+		printf("[%s]: %s\n", conn->username, message);
 	}
 }
 
 static bool authenticate(const char *name, int fd) {
-    for (int i = 0; i < globalsrv->num_clients; i++) {
-        if (strcmp(name, globalsrv->creds[i].username) == 0) {
-            globalsrv->creds[i].fd = fd;
-            return true;
-        }
-    }
+	for (int i = 0; i < globalsrv->num_clients; i++) {
+		if (strcmp(name, globalsrv->creds[i].username) == 0) {
+			globalsrv->creds[i].fd = fd;
+			return true;
+		}
+	}
 
-    return false;
+	return false;
 }
 
 //handler_ only deals with a particular connection
@@ -133,7 +152,7 @@ private void handler_(connection *conn) {
 
 			if (conn->auth == AUTH_PENDING) {
 				if (authenticate(conn->input, conn->fd)) {
-					strncpy(conn->username, conn->input, sizeof(conn->username) - 1);
+					strncpy(conn->username, conn->input, strlen(conn->username));
 					conn->auth = AUTHENTICATED;
 
 					printf("Authenticated: %s\n", conn->username);
@@ -143,8 +162,7 @@ private void handler_(connection *conn) {
 					conn->send(conn->fd, "State your name -_-: ", 21);
 				}
 			} else {
-					netio(conn);
-				// TODO: interpret LS, CD, SEND, etc.
+				netio(conn);
 			}
 		}
 	}
@@ -305,14 +323,6 @@ private void accept_clients(int efd) {
 		conn->recv = &recvfunc;
 		conn->auth = AUTH_PENDING;
 		conn->input_len = 0;
-		conn->loc = malloc(100);
-		if (conn->loc == NULL) {
-			close(client_fd);
-			free(conn);
-			continue;
-		}
-
-		strcpy(conn->loc, "$");
 		conn->target_fd = -1;
 		
 		if (conn->send(conn->fd, "State your name: ", 18) < 0) {

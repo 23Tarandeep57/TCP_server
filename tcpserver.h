@@ -58,13 +58,12 @@ struct s_connection {
 	int8 host[16];
 	int16 port;
 	int (*recv)(int, char *, int);
-    int (*send)(int, char *, int);
+	int (*send)(int, char *, int);
 
 	auth_state auth;
 	char input[IBUF_SZ];
 	char username[UNAME_LEN];
 	size_t input_len;
-	char* loc;
 	int target_fd;
 };
 typedef struct s_connection connection;
@@ -87,7 +86,7 @@ struct s_server {
 	char* (*err)(void);
 	int (*listen)(void);
 	callback cb;
-    char errmsg[];
+	char errmsg[];
 };
 typedef struct s_server server;
 
