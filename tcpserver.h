@@ -47,17 +47,25 @@ typedef enum {
 	AUTHENTICATED
 } auth_state;
 
+struct s_cred {
+	char username[UNAME_LEN];
+	int32 fd;
+};
+typedef struct s_cred cred;
+
 struct s_connection {
 	int32 fd;
 	int8 host[16];
 	int16 port;
-	int (*recv)(struct s_connection *, char *, int);
-    int (*send)(struct s_connection *, char *, int);
+	int (*recv)(int, char *, int);
+    int (*send)(int, char *, int);
 
 	auth_state auth;
-	char username[UNAME_LEN];
 	char input[IBUF_SZ];
+	char username[UNAME_LEN];
 	size_t input_len;
+	char* loc;
+	int target_fd;
 };
 typedef struct s_connection connection;
 
@@ -73,6 +81,8 @@ struct s_server {
 	int32 fd;
 	int8 status:1;
 	int16 port;
+	int num_clients;
+	cred creds[MAX_CLIENTS];
 	bool (*ok)(void);
 	char* (*err)(void);
 	int (*listen)(void);
@@ -88,5 +98,5 @@ public server *tcpserver(int16, callback);
 private bool okfunc(void);
 private char *errfunc(void);
 private int listenfunc(void);
-private int recvfunc(connection*, char*, int);
-private int sendfunc(connection*, char*, int);
+private int recvfunc(int, char*, int);
+private int sendfunc(int, char*, int);

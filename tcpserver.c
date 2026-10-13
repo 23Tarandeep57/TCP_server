@@ -5,30 +5,96 @@ public server *globalsrv;
 #define handler() &handler_
 #define PORT 8181
 
-char* all_clients[]= {"max", "taran", "kola"};
-int num_clients = 3;
+private init void start() {
+	globalsrv = (server*) 0;
+	return;
+}
 
-
-
-static bool authenticate(const char* name) {// TODO: Passworrd
-	for (int i = 0; i < num_clients; i++) {
-		if (strcmp(name, all_clients[i]) == 0)
-			return true;
+int name_to_fd(char* name) {
+	for (int i = 0; i < globalsrv->num_clients; i++) {
+		if (strcmp(globalsrv->creds[i].username, name) == 0) 
+			return globalsrv->creds[i].fd;
 	}
-	
-	return false;
+	return 0;
+}
+char* fd_to_name(int fd) {
+	for (int i= 0; i < globalsrv->num_clients; i++) {
+		if (fd == globalsrv->creds[i].fd) 
+			return globalsrv->creds[i].username;
+	}
+	return NULL;
+}
+
+static char **parser(char *instr) {
+    static char *parts[100];
+    char *saveptr = NULL;
+    char *token;
+    int n = 0;
+
+    memset(parts, 0, sizeof(parts));
+
+    token = strtok_r(instr, " \t", &saveptr);
+
+    while (token != NULL && n < 99) {
+        parts[n++] = token;
+        token = strtok_r(NULL, " \t", &saveptr);
+    }
+
+    parts[n] = NULL;
+    return parts;
+} 
+
+void netio(connection* conn) {
+	int i;
+	char* name;
+	char** parts = parser(conn->input);
+	if (conn->target_fd != -1) {
+		conn->send(conn->target_fd, conn->username, sizeof(conn->username));
+		conn->send(conn->target_fd, conn->input, sizeof(conn->input));
+	}
+	if (strcmp(conn->input, "LS") == 0) {
+    	for (i = 0; i < globalsrv->num_clients; i++) {
+        	name = globalsrv->creds[i].username;
+        	conn->send(conn->fd, name, strlen(name));
+        	conn->send(conn->fd, "  ", 2);
+    	}
+    	conn->send(conn->fd, "\n", 1);
+	}else if (strcmp(parts[0], "CD") == 0) {//TODO assert parts.size == 2
+		strcat(conn->loc, parts[1]);
+		int target_fd = name_to_fd(parts[1]);
+		if (target_fd == 0) {
+			printf("NO USER OF THIS NAME");
+		}
+		conn->target_fd = target_fd;
+	}
+	else {
+		printf("[%s]: %s\n", conn->username, conn->input);
+	}
+}
+
+static bool authenticate(const char *name, int fd) {
+    for (int i = 0; i < globalsrv->num_clients; i++) {
+        if (strcmp(name, globalsrv->creds[i].username) == 0) {
+            globalsrv->creds[i].fd = fd;
+            return true;
+        }
+    }
+
+    return false;
 }
 
 //handler_ only deals with a particular connection
 private void handler_(connection *conn) {
-	char buff[128];
+	char buff[OBUF_SZ];
+	int ret, i;
+	char ch;
 	memset(buff, 0, sizeof(buff));
-	//conn->send(conn, "welcome to server\n", 19);
+	//conn->send(conn->fd, "welcome to server\n", 19);
 
     /* Because the socket is non-blocking and we are using
      * edge-triggered epoll, keep reading until EAGAIN*/
 	while (1) {
-		int ret = conn->recv(conn, buff, sizeof(buff) - 1);
+		ret = conn->recv(conn->fd, buff, sizeof(buff) - 1);
 
 		if (ret == 0) {
 			close(conn->fd);
@@ -46,8 +112,8 @@ private void handler_(connection *conn) {
 			return;
 		}
 
-		for (int i = 0; i < ret; i++) {
-			char ch = buff[i];
+		for (i = 0; i < ret; i++) {
+			ch = buff[i];
 
 			if (ch == '\r') continue;
 			if (ch != '\n') {
@@ -66,28 +132,22 @@ private void handler_(connection *conn) {
 			conn->input_len = 0;
 
 			if (conn->auth == AUTH_PENDING) {
-				if (authenticate(conn->input)) {
+				if (authenticate(conn->input, conn->fd)) {
 					strncpy(conn->username, conn->input, sizeof(conn->username) - 1);
 					conn->auth = AUTHENTICATED;
 
 					printf("Authenticated: %s\n", conn->username);
-					conn->send(conn, "Login successful!\n", 18);
+					conn->send(conn->fd, "You can join the Counsil ;)\n", 28);
 				} else {
-					conn->send(conn, "Unknown username.\n", 19);
-					conn->send(conn, "Enter your username: ", 21);
+					conn->send(conn->fd, "I don't know you. 0_o \n", 24);
+					conn->send(conn->fd, "State your name -_-: ", 21);
 				}
 			} else {
-				printf("[%s]: %s\n", conn->username, conn->input);
-
+					netio(conn);
 				// TODO: interpret LS, CD, SEND, etc.
 			}
 		}
 	}
-}
-
-private init void start() {
-	globalsrv = (server*) 0;
-	return;
 }
 
 public server* tcpserver(int16 port, callback cb) {
@@ -153,6 +213,11 @@ public server* tcpserver(int16 port, callback cb) {
 	srv->cb = cb;
 	srv->err = &errfunc;
 	srv->listen = &listenfunc;
+	srv->num_clients= 2;
+	strcpy(srv->creds[0].username, "taran");
+	srv->creds[0].fd = -1;
+	strcpy(srv->creds[1].username, "kola");
+	srv->creds[1].fd = -1;
 	globalsrv = srv;
 	
 	return srv;
@@ -240,12 +305,21 @@ private void accept_clients(int efd) {
 		conn->recv = &recvfunc;
 		conn->auth = AUTH_PENDING;
 		conn->input_len = 0;
+		conn->loc = malloc(100);
+		if (conn->loc == NULL) {
+			close(client_fd);
+			free(conn);
+			continue;
+		}
+
+		strcpy(conn->loc, "$");
+		conn->target_fd = -1;
 		
-		if (conn->send(conn, "Enter your username: ", 21) < 0) {
-    		close(client_fd);
-    		free(conn);
+		if (conn->send(conn->fd, "State your name: ", 18) < 0) {
+			close(client_fd);
+			free(conn);
 			sleep(2);
-    		continue;
+			continue;
 		}
 
 		memset(&ev, 0, sizeof(ev));
@@ -313,18 +387,18 @@ private int listenfunc(void) {
 	return 0;
 }
 
-private int recvfunc(connection *conn, char* buff, int size) {
-	if (!conn || !buff || !size)
+private int recvfunc(int fd, char* buff, int size) {
+	if (!buff || !size)
 		return -1;
 
-	return read(conn->fd, buff, size);
+	return read(fd, buff, size);
 }
 
-private int sendfunc(connection *conn, char* buff, int size) {
-	if (!conn || !buff || !size)
+private int sendfunc(int fd, char* buff, int size) {
+	if (!buff || !size)
 		return -1;
 
-	return write(conn->fd, buff, size);
+	return write(fd, buff, size);
 }
 
 int main() {
