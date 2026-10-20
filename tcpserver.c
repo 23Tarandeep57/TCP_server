@@ -13,9 +13,10 @@ private init void start() {
 int name_to_fd(char* name) {
 	for (int i = 0; i < globalsrv->num_clients; i++) {
 		if (strcmp(globalsrv->creds[i].username, name) == 0) 
+			printf("%s : %s", globalsrv->creds[i].username, name);
 			return globalsrv->creds[i].fd;
 	}
-	return 0;
+	return -1;
 }
 char* fd_to_name(int fd) {
 	for (int i= 0; i < globalsrv->num_clients; i++) {
@@ -24,8 +25,16 @@ char* fd_to_name(int fd) {
 	}
 	return NULL;
 }
-
-static char **parser(char *instr) {
+private void mark_offline(int fd) {
+	int i;
+	for (i = 0; i < globalsrv->num_clients; i++) {
+		if (globalsrv->creds[i].fd == fd) {
+			globalsrv->creds[i].fd = -1;
+			return;
+		}
+	}
+}
+private char **parser(char *instr) {
 	static char *parts[100];
 	char *saveptr = NULL;
 	char *token;
@@ -48,58 +57,112 @@ void netio(connection* conn) {
 	char message[IBUF_SZ];
 	int i;
 	char* name;
-	strncpy(message, conn->input, sizeof(message) - 1);
-	message[sizeof(message) - 1] = '\0';
+    snprintf(message, sizeof(message), "%s", conn->input);
 	
 	char parsebuf[IBUF_SZ];
-	strcpy(parsebuf, message);
+	snprintf(parsebuf, sizeof(parsebuf), "%s", message);
 
 	char **parts = parser(parsebuf);
 	if (parts[0] == NULL)
 		return;
 	
-	if (strcmp(conn->input , "QUIT") == 0) 
+	if (strcmp(parts[0], "QUIT") == 0 && !parts[1]) {
 		conn->target_fd = -1;
-
-	else if (conn->target_fd != -1) {
-		char* msg;
-		size_t sz = (sizeof(conn->username) + 4);
-		msg = malloc(sz);
-		strcat(msg, "[");
-		strcat(msg, conn->username);
-		strcat(msg, "] ");
-		conn->send(conn->target_fd, msg, sz);
+		conn->target_name[0] = '\0';
+		return;
+	} if (conn->target_fd != -1) {
+		size_t sz = (sizeof(conn->username) + 8);
+		char msg[sz];
+		snprintf(msg, sz, "[%s]:", conn->username);
+		conn->send(conn->target_fd, msg, strlen(msg));
 		conn->send(conn->target_fd, message, strlen(message));
 		conn->send(conn->target_fd, "\n", 1);
 	}
-	else if (strcmp(conn->input, "LS") == 0) {
+	if (strcmp(parts[0], "LS") ==0 && !parts[1]){
     	for (i = 0; i < globalsrv->num_clients; i++) {
-			name = globalsrv->creds[i].username;
-			conn->send(conn->fd, name, strlen(name));
-			conn->send(conn->fd, "  ", 2);
+			char line[UNAME_LEN+32];
+			snprintf(line, sizeof(line), "%s %s\n",
+					globalsrv->creds[i].username,
+					globalsrv->creds[i].fd >= 0 ? 
+						"[online]" : "[offline]");
+		conn->send(conn->fd, line, (int)strlen(line));
 		}
-		conn->send(conn->fd, "\n", 1);
-	}else if (strcmp(parts[0], "CD") == 0) {//TODO assert parts.size == 2
+		return;
+	}
+	if (strcmp(parts[0], "CD") == 0) {//TODO assert parts.size == 2
+		if (!parts[1]) {
+			conn->send(conn->fd, "USAGE: CD <username>\n", 21);
+			return;
+		}
 		int target_fd = name_to_fd(parts[1]);
-		if (target_fd == 0) {
-			printf("NO USER OF THIS NAME");
+		strncpy(conn->target_name, parts[1], strlen(parts[1]));
+		if (target_fd == -1) {
+			conn->send(conn->fd, "Unknown USER\n", 13);
+			return;
 		}
+
 		conn->target_fd = target_fd;
+		conn->send(conn->fd, "Chat selected\n", 14);
+		return;
 	}
-	else {
-		printf("[%s]: %s\n", conn->username, message);
+	if (strcmp(parts[0], "ACK") == 0){
+		if (!parts[1]) {
+			conn->send(conn->fd, "USAGE: ACK <id>\n", 16);
+			return;
+		}
+		char *end;
+		errno = 0;
+		int64 raw_id= strtoull(parts[1], &end, 10);
+
+		if(errno || end == parts[1] || *end != '\0' || raw_id== 0) {
+			conn->send(conn->fd, "Invalid_messageId\n", 18);
+			return;
+		}
+
+		if (ack_msg(conn->username, (int64)raw_id)) 
+			conn->send(conn->fd, "ACK OK\n", 7);
+		else 
+			conn->send(conn->fd, "ACK FAILED\n", 11);
+		return;
+	} 
+	if (conn->target_fd == -1) {
+		conn->send(conn->fd, "Select a recipient using CD first\n", 34);
+		return;
 	}
+
+	int64 id;
+	if (!store_msg(conn->username, conn->target_name, message, &id)) {
+		conn->send(conn->fd, "FAiled to persist message\n", 26);
+
+		int target_fd = name_to_fd(conn->target_name);
+		if (target_fd  >= 0) {
+			if (!deliver_one(target_fd, id, conn->username, conn->target_name, message))
+				printf("DELIVERY attempt failed for msg %" PRIu64 "\n", id);
+		}
+	}
+
+	char resp[100];
+	snprintf(resp, sizeof(resp), "Persisted %" PRIu64 "\n", id);
+	conn->send(conn->fd, resp, (int)strlen(resp));
 }
 
-static bool authenticate(const char *name, int fd) {
+int valid_user(const char* name) {
 	for (int i = 0; i < globalsrv->num_clients; i++) {
 		if (strcmp(name, globalsrv->creds[i].username) == 0) {
-			globalsrv->creds[i].fd = fd;
-			return true;
+			return i;
 		}
 	}
 
-	return false;
+	return -1;
+}
+
+private bool authenticate(const char *name, int fd) {
+	int id;
+	id =  valid_user(name);
+	if (id == -1) return false;
+
+	globalsrv->creds[id].fd = fd;	
+	return true;
 }
 
 //handler_ only deals with a particular connection
@@ -116,6 +179,7 @@ private void handler_(connection *conn) {
 		ret = conn->recv(conn->fd, buff, sizeof(buff) - 1);
 
 		if (ret == 0) {
+			mark_offline(conn->fd);
 			close(conn->fd);
 			free(conn);
 			return;
@@ -126,6 +190,7 @@ private void handler_(connection *conn) {
 				break;
 
 			perror("recv");
+			mark_offline(conn->fd);
 			close(conn->fd);
 			free(conn);
 			return;
@@ -137,6 +202,7 @@ private void handler_(connection *conn) {
 			if (ch == '\r') continue;
 			if (ch != '\n') {
 				if (conn->input_len >= IBUF_SZ - 1) {
+					mark_offline(conn->fd);
 					close(conn->fd);
 					free(conn);
 					return;
@@ -152,11 +218,14 @@ private void handler_(connection *conn) {
 
 			if (conn->auth == AUTH_PENDING) {
 				if (authenticate(conn->input, conn->fd)) {
-					strncpy(conn->username, conn->input, strlen(conn->username));
+					snprintf(conn->username, sizeof(conn->username), "%s", conn->input);
 					conn->auth = AUTHENTICATED;
-
+					printf("%s\n", conn->username);
 					printf("Authenticated: %s\n", conn->username);
 					conn->send(conn->fd, "You can join the Counsil ;)\n", 28);
+					
+    				if (!deliver_pending(conn->username, conn->fd))
+        				printf("Pending delivery failed for %s\n", conn->username);
 				} else {
 					conn->send(conn->fd, "I don't know you. 0_o \n", 24);
 					conn->send(conn->fd, "State your name -_-: ", 21);
@@ -324,6 +393,7 @@ private void accept_clients(int efd) {
 		conn->auth = AUTH_PENDING;
 		conn->input_len = 0;
 		conn->target_fd = -1;
+		conn->target_name[0] = '\0';
 		
 		if (conn->send(conn->fd, "State your name: ", 18) < 0) {
 			close(client_fd);
@@ -354,6 +424,7 @@ private void handle_client_event(int efd, struct epoll_event *event ) {
 		epoll_ctl(efd, EPOLL_CTL_DEL, conn->fd, NULL);
 
 		printf("Client disconnected: %s:%d\n", conn->host, conn->port);
+		mark_offline(conn->fd);
 		close(conn->fd);
 		free(conn);
 		return;
@@ -431,7 +502,12 @@ int main() {
 		free(serv);
 		return -1;
 	}
+	if (!msg_init()) {
+		perror("Message_init() failed");
+		free(serv);
+		return -1;
+	}
 	printf("Listening to port %d\n", PORT);
-
+	
 	return serv->listen();
 }

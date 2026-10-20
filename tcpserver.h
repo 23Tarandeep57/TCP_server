@@ -11,7 +11,16 @@
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <sys/epoll.h>
+#include <cjson/cJSON.h>
+#include <stdint.h>
+#include <inttypes.h>
+#include <time.h>
+#include <poll.h>
+#include <sys/stat.h>
 
+#define DATA_DIR    "data"
+#define HISTORY_DIR "data/history"
+#define PENDING_DIR "data/pending"
 #define MAX_CLIENTS  128
 #define MAX_EVENTS   128
 
@@ -49,7 +58,7 @@ typedef enum {
 
 struct s_cred {
 	char username[UNAME_LEN];
-	int32 fd;
+	int fd;
 };
 typedef struct s_cred cred;
 
@@ -64,6 +73,7 @@ struct s_connection {
 	char input[IBUF_SZ];
 	char username[UNAME_LEN];
 	size_t input_len;
+	char target_name[UNAME_LEN];
 	int target_fd;
 };
 typedef struct s_connection connection;
@@ -92,10 +102,33 @@ typedef struct s_server server;
 
 int main();
 private init void start(void);
+int name_to_fd(char*);
+char* fd_to_name(int);
+private void mark_offline(int);
+private char **parser(char*);
+void netio(connection*);
+int valid_user(const char* );
+private bool authenticate(const char*, int fd);
 private void handler_(connection*);
 public server *tcpserver(int16, callback);
 private bool okfunc(void);
 private char *errfunc(void);
+private int create_epoll(void);
+private void accept_clients(int);
+private void handle_client_event(int, struct epoll_event*);
 private int listenfunc(void);
 private int recvfunc(int, char*, int);
 private int sendfunc(int, char*, int);
+bool msg_init(void);
+private bool make_path(char*, size_t, const char*, const char*);
+private bool his_path(char*, size_t, const char*, const char*);
+private bool pending_path(char*, size_t, const char*);
+private int64 new_id(void);
+private bool append_json(FILE *, const cJSON*);
+private cJSON *make_msg(int64, const char*, const char*, const char*);
+
+bool store_msg(const char*,const char*, const char*,int64*);
+bool deliver_pending(const char *, int);
+private bool sendall(int, const char*, size_t);
+bool deliver_one(int, int64, const char*, const char*, const char*);
+bool ack_msg(const char *,int64);
