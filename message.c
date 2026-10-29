@@ -223,6 +223,35 @@ bool deliver_pending(const char* uname, int fd) {
 	return ok;
 	
 }
+
+bool deliver_history(const char *user, const char *other, int fd) {
+	char path[256];
+	FILE *fptr;
+	char *line = NULL;
+	size_t cap = 0;
+	bool ok = true;
+
+	if (valid_user(user) == -1 || valid_user(other) == -1 ||
+	    !his_path(path, sizeof(path), user, other))
+		return false;
+
+	fptr = fopen(path, "r");
+	if (!fptr) return errno == ENOENT;
+
+	while (getline(&line, &cap, fptr) != -1) {
+		if (!sendall(fd, "MSG ", 4) ||
+		    !sendall(fd, line, strlen(line))) {
+			ok = false;
+			break;
+		}
+	}
+
+	if (ferror(fptr)) ok = false;
+	free(line);
+	if (fclose(fptr) != 0) ok = false;
+	return ok;
+}
+
 bool ack_msg(const char *uname, int64 msg_id){
 	if (valid_user(uname) == -1) return false;
 

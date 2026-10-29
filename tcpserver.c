@@ -31,6 +31,7 @@ private void mark_offline(int fd) {
 	for (i = 0; i < globalsrv->num_clients; i++) {
 		if (globalsrv->creds[i].fd == fd) {
 			globalsrv->creds[i].fd = -1;
+			globalsrv->creds[i].session = NULL;
 			return;
 		}
 	}
@@ -88,14 +89,19 @@ void netio(connection* conn) {
 			conn->send(conn->fd, "USAGE: CD <username>\n", 21);
 			return;
 		}
-		int target_fd = name_to_fd(parts[1]);
-		if (target_fd == -1) {
+		if (valid_user(parts[1]) == -1) {
 			conn->send(conn->fd, "Unknown USER\n", 13);
 			return;
 		}
 
 		snprintf(conn->target_name, sizeof(conn->target_name), "%s", parts[1]);
-		conn->target_fd = target_fd;
+		conn->target_fd = name_to_fd(parts[1]);
+		if (!deliver_history(conn->username, conn->target_name, conn->fd)) {
+			conn->target_fd = -1;
+			conn->target_name[0] = '\0';
+			conn->send(conn->fd, "Chat history unavailable\n", 24);
+			return;
+		}
 		conn->send(conn->fd, "Chat selected\n", 14);
 		return;
 	}
@@ -119,22 +125,26 @@ void netio(connection* conn) {
 			conn->send(conn->fd, "ACK FAILED\n", 11);
 		return;
 	} 
-	if (conn->target_fd == -1) {
+	if (conn->target_name[0] == '\0') {
 		conn->send(conn->fd, "Select a recipient using CD first\n", 34);
 		return;
 	}
-
-	size_t sz = sizeof(conn->username) + 8;
-	char msg[sz];
-	snprintf(msg, sz, "[%s]:", conn->username);
-	conn->send(conn->target_fd, msg, strlen(msg));
-	conn->send(conn->target_fd, message, strlen(message));
-	conn->send(conn->target_fd, "\n", 1);
 
 	int64 id;
 	if (!store_msg(conn->username, conn->target_name, message, &id)) {
 		conn->send(conn->fd, "FAiled to persist message\n", 26);
 		return;
+	}
+
+	int recipient = valid_user(conn->target_name);
+	connection *target = recipient >= 0 ? globalsrv->creds[recipient].session : NULL;
+	if (target && strcmp(target->target_name, conn->username) == 0) {
+		size_t sz = sizeof(conn->username) + 8;
+		char msg[sz];
+		snprintf(msg, sz, "[%s]:", conn->username);
+		target->send(target->fd, msg, strlen(msg));
+		target->send(target->fd, message, strlen(message));
+		target->send(target->fd, "\n", 1);
 	}
 
 	char resp[100];
@@ -216,12 +226,10 @@ private void handler_(connection *conn) {
 				if (authenticate(conn->input, conn->fd)) {
 					snprintf(conn->username, sizeof(conn->username), "%s", conn->input);
 					conn->auth = AUTHENTICATED;
+					globalsrv->creds[valid_user(conn->username)].session = conn;
 					printf("%s\n", conn->username);
 					printf("Authenticated: %s\n", conn->username);
 					conn->send(conn->fd, "You can join the Counsil ;)\n", 28);
-					
-    				if (!deliver_pending(conn->username, conn->fd))
-        				printf("Pending delivery failed for %s\n", conn->username);
 				} else {
 					conn->send(conn->fd, "I don't know you. 0_o \n", 24);
 					conn->send(conn->fd, "State your name -_-: ", 21);

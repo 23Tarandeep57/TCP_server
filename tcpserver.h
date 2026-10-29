@@ -59,6 +59,7 @@ typedef enum {
 struct s_cred {
 	char username[UNAME_LEN];
 	int fd;
+	struct s_connection *session;
 };
 typedef struct s_cred cred;
 
@@ -129,6 +130,7 @@ private cJSON *make_msg(int64, const char*, const char*, const char*);
 
 bool store_msg(const char*,const char*, const char*,int64*);
 bool deliver_pending(const char *, int);
+bool deliver_history(const char *, const char *, int);
 private bool sendall(int, const char*, size_t);
 bool deliver_one(int, int64, const char*, const char*, const char*);
 bool ack_msg(const char *,int64);
