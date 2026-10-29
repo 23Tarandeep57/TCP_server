@@ -12,9 +12,10 @@ private init void start() {
 
 int name_to_fd(char* name) {
 	for (int i = 0; i < globalsrv->num_clients; i++) {
-		if (strcmp(globalsrv->creds[i].username, name) == 0) 
+		if (strcmp(globalsrv->creds[i].username, name) == 0) {
 			printf("%s : %s", globalsrv->creds[i].username, name);
 			return globalsrv->creds[i].fd;
+		}
 	}
 	return -1;
 }
@@ -70,13 +71,6 @@ void netio(connection* conn) {
 		conn->target_fd = -1;
 		conn->target_name[0] = '\0';
 		return;
-	} if (conn->target_fd != -1) {
-		size_t sz = (sizeof(conn->username) + 8);
-		char msg[sz];
-		snprintf(msg, sz, "[%s]:", conn->username);
-		conn->send(conn->target_fd, msg, strlen(msg));
-		conn->send(conn->target_fd, message, strlen(message));
-		conn->send(conn->target_fd, "\n", 1);
 	}
 	if (strcmp(parts[0], "LS") ==0 && !parts[1]){
     	for (i = 0; i < globalsrv->num_clients; i++) {
@@ -95,12 +89,12 @@ void netio(connection* conn) {
 			return;
 		}
 		int target_fd = name_to_fd(parts[1]);
-		strncpy(conn->target_name, parts[1], strlen(parts[1]));
 		if (target_fd == -1) {
 			conn->send(conn->fd, "Unknown USER\n", 13);
 			return;
 		}
 
+		snprintf(conn->target_name, sizeof(conn->target_name), "%s", parts[1]);
 		conn->target_fd = target_fd;
 		conn->send(conn->fd, "Chat selected\n", 14);
 		return;
@@ -130,15 +124,17 @@ void netio(connection* conn) {
 		return;
 	}
 
+	size_t sz = sizeof(conn->username) + 8;
+	char msg[sz];
+	snprintf(msg, sz, "[%s]:", conn->username);
+	conn->send(conn->target_fd, msg, strlen(msg));
+	conn->send(conn->target_fd, message, strlen(message));
+	conn->send(conn->target_fd, "\n", 1);
+
 	int64 id;
 	if (!store_msg(conn->username, conn->target_name, message, &id)) {
 		conn->send(conn->fd, "FAiled to persist message\n", 26);
-
-		int target_fd = name_to_fd(conn->target_name);
-		if (target_fd  >= 0) {
-			if (!deliver_one(target_fd, id, conn->username, conn->target_name, message))
-				printf("DELIVERY attempt failed for msg %" PRIu64 "\n", id);
-		}
+		return;
 	}
 
 	char resp[100];

@@ -98,10 +98,15 @@ bool store_msg(const char* sender, const char *getter, const char* text, int64 *
 	ok = append_json(fptr, obj);
 
 	if (!ok) {
+		fclose(fptr);
 		cJSON_Delete(obj);
 		return  false;
 	}
 	printf("4\n");
+	if (fclose(fptr) != 0) {
+		cJSON_Delete(obj);
+		return false;
+	}
 
 	fptr = fopen(hpath, "a");
 	if (!fptr) {
@@ -121,19 +126,34 @@ bool store_msg(const char* sender, const char *getter, const char* text, int64 *
 
 static bool sendall(int fd, const char *buf, size_t len) {
 	size_t send= 0;
-	int  ret;
 	while(send < len) {
 		ssize_t n = write(fd, buf + send, len-send);
 		if (n > 0) {
 			send += (size_t)n;
 			continue;
 		}
-// TODO:EPOLL USE HERE
 		if (n < 0 && errno == EINTR) continue;
 		if (n < 0 && (errno == EAGAIN || errno==EWOULDBLOCK)){
-		struct pollfd pfd = {.fd = fd, .events = POLLOUT};
-			ret = poll(&pfd, 1, 1000);
-			if (ret > 0 && (pfd.revents & POLLOUT))
+			int epfd = epoll_create1(EPOLL_CLOEXEC);
+			if (epfd < 0) return false;
+
+			struct epoll_event event = {
+				.events = EPOLLOUT,
+				.data.fd = fd
+			};
+			if (epoll_ctl(epfd, EPOLL_CTL_ADD, fd, &event) < 0) {
+				close(epfd);
+				return false;
+			}
+
+			int ret;
+			do {
+				ret = epoll_wait(epfd, &event, 1, 1000);
+			} while (ret < 0 && errno == EINTR);
+			close(epfd);
+
+			if (ret > 0 && (event.events & EPOLLOUT) &&
+			    !(event.events & (EPOLLERR | EPOLLHUP | EPOLLRDHUP)))
 				continue;
 			return false;
 		}
